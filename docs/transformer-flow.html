@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>How data flows through the Transformer</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2330;
+      --line: #2d3d52;
+      --text: #e8eef6;
+      --muted: #8b9bb0;
+      --src: #5b9fd4;
+      --tgt: #d4a017;
+      --mem: #3dba8b;
+      --attn: #e07a5f;
+      --pad: #4a5568;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1.25rem 1.5rem 0.5rem;
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 { margin: 0 0 0.35rem; font-size: 1.35rem; font-weight: 650; }
+    header p { margin: 0; color: var(--muted); font-size: 0.95rem; max-width: 52rem; }
+    .wrap { display: grid; grid-template-columns: 1fr 280px; gap: 0; min-height: calc(100vh - 5.5rem); }
+    @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+    .stage {
+      padding: 1.25rem 1.5rem 2rem;
+      position: relative;
+    }
+    .scene { display: none; }
+    .scene.on { display: block; animation: fade 0.45s ease; }
+    @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .scene h2 { margin: 0 0 0.5rem; font-size: 1.15rem; color: #fff; }
+    .scene .why { color: var(--muted); margin: 0 0 1.1rem; max-width: 40rem; }
+    .row {
+      display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; margin: 0.65rem 0;
+    }
+    .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; width: 7.5rem; flex-shrink: 0; }
+    .tok {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 3.4rem; padding: 0.4rem 0.55rem; border-radius: 8px;
+      font-size: 0.82rem; font-weight: 600;
+      animation: pop 0.5s ease both;
+    }
+    @keyframes pop { from { transform: scale(0.7); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .tok.src { background: #1e3a54; color: #b8d9f5; border: 1px solid var(--src); }
+    .tok.tgt { background: #3d320c; color: #f0d78c; border: 1px solid var(--tgt); }
+    .tok.pad { background: #252a33; color: #6b7788; border: 1px dashed var(--pad); }
+    .tok.mem { background: #143d30; color: #9ee6c8; border: 1px solid var(--mem); }
+    .tok.hi { box-shadow: 0 0 0 2px var(--attn); }
+    .arrow { color: var(--muted); padding: 0 0.2rem; }
+    .box {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+      padding: 0.9rem 1rem; margin: 0.75rem 0;
+    }
+    .box strong { color: #fff; }
+    .grid8 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.4rem; max-width: 28rem; }
+    .head {
+      height: 2.2rem; border-radius: 6px; background: #243044;
+      border: 1px solid var(--src); animation: pulse 1.4s ease infinite alternate;
+    }
+    .head:nth-child(2) { animation-delay: 0.15s; border-color: var(--mem); }
+    .head:nth-child(3) { animation-delay: 0.3s; border-color: var(--tgt); }
+    .head:nth-child(4) { animation-delay: 0.45s; border-color: var(--attn); }
+    @keyframes pulse { from { opacity: 0.45; } to { opacity: 1; } }
+    .attn-grid { display: grid; grid-template-columns: repeat(4, 3.2rem); gap: 4px; }
+    .cell { width: 3.2rem; height: 3.2rem; border-radius: 4px; background: #1e3a54; }
+    .cell.on { animation: glow 1.2s ease infinite alternate; }
+    @keyframes glow { from { background: #1e3a54; } to { background: var(--attn); } }
+    .tri { font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem; color: #9ee6c8; white-space: pre; line-height: 1.35; }
+    .controls {
+      display: flex; gap: 0.5rem; align-items: center; margin-top: 1.25rem; flex-wrap: wrap;
+    }
+    button {
+      background: #2a4a6e; color: #fff; border: 0; border-radius: 8px;
+      padding: 0.45rem 0.85rem; cursor: pointer; font-size: 0.9rem;
+    }
+    button:hover { background: #35608c; }
+    .bar { flex: 1; min-width: 8rem; height: 6px; background: #243044; border-radius: 99px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; background: var(--mem); width: 0; transition: width 0.3s; }
+    aside {
+      border-left: 1px solid var(--line); padding: 1rem 1.1rem; background: #121820;
+    }
+    aside h3 { margin: 0 0 0.6rem; font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    aside ol { margin: 0; padding-left: 1.15rem; color: var(--muted); font-size: 0.82rem; }
+    aside li { margin: 0.28rem 0; cursor: pointer; }
+    aside li.active { color: var(--text); font-weight: 600; }
+    .code-map { font-size: 0.78rem; color: var(--muted); margin-top: 1rem; }
+    .code-map code { color: #9ee6c8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Data flow through the Transformer</h1>
+    <p>
+      Same path as <em>The Annotated Transformer</em> / this repo’s notebook.
+      German becomes numbers, then meaning, then English — one word at a time.
+      Press play. You do not need to read code.
+    </p>
+  </header>
+  <div class="wrap">
+    <main class="stage">
+      <section class="scene on" data-i="0">
+        <h2>1. A sentence enters</h2>
+        <p class="why">The machine does not read letters like a person. First it splits the sentence into words (tokens), using spaCy — same as the notebook <code>tokenize</code> / <code>load_tokenizers</code>.</p>
+        <div class="box">
+          <div class="row"><span class="label">German</span> Ein rotes Flugzeug fliegt</div>
+          <div class="row"><span class="label">Words</span>
+            <span class="tok src" style="animation-delay:0s">Ein</span>
+            <span class="tok src" style="animation-delay:.1s">rotes</span>
+            <span class="tok src" style="animation-delay:.2s">Flugzeug</span>
+            <span class="tok src" style="animation-delay:.3s">fliegt</span>
+          </div>
+        </div>
+      </section>
+      <section class="scene" data-i="1">
+        <h2>2. Words become IDs + special tokens</h2>
+        <p class="why"><code>build_vocabulary</code> / <code>load_vocab</code> maps each word to a number. <code>collate_batch</code> wraps the sentence with start <code>&lt;s&gt;</code> and end <code>&lt;/s&gt;</code>, then pads with <code>&lt;blank&gt;</code> so every example in a batch is the same length (<code>max_padding</code>, often 72).</p>
+        <div class="row"><span class="label">IDs</span>
+          <span class="tok tgt">&lt;s&gt;</span><span class="arrow">+</span>
+          <span class="tok src">47</span><span class="tok src">812</span><span class="tok src">2201</span><span class="tok src">90</span>
+          <span class="arrow">+</span><span class="tok tgt">&lt;/s&gt;</span>
+          <span class="tok pad">&lt;blank&gt;</span><span class="tok pad">&lt;blank&gt;</span>
+        </div>
+        <p class="why">A <strong>src mask</strong> later says: ignore the blanks. That is <code>Batch.src_mask</code>.</p>
+      </section>
+      <section class="scene" data-i="2">
+        <h2>3. Each ID becomes a meaning vector (Embeddings)</h2>
+        <p class="why"><code>Embeddings</code> looks up a list of 512 numbers per word, then multiplies by √512 so position waves do not drown the meaning. German and English each have their own lookup table.</p>
+        <div class="row"><span class="label">Ein →</span> <span class="tok mem">512 numbers</span></div>
+        <div class="row"><span class="label">rotes →</span> <span class="tok mem">512 numbers</span></div>
+        <div class="row"><span class="label">Flugzeug →</span> <span class="tok mem">512 numbers</span></div>
+      </section>
+      <section class="scene" data-i="3">
+        <h2>4. Position is added (PositionalEncoding)</h2>
+        <p class="why">Attention has no left-to-right order by itself. <code>PositionalEncoding</code> adds a unique sine/cosine pattern for slot 1, 2, 3… so “red plane” is not the same as “plane red”.</p>
+        <div class="box">vector = meaning + position&nbsp;&nbsp;→&nbsp;&nbsp;still 512 numbers, still the same number of words</div>
+      </section>
+      <section class="scene" data-i="4">
+        <h2>5. Encoder: words look at each other</h2>
+        <p class="why"><code>Encoder</code> stacks <code>EncoderLayer</code> N times (paper: 6). Each layer: <code>LayerNorm</code> + residual <code>SubLayerConnection</code> around (1) <code>MultiHeadAttention</code> self-attn and (2) <code>PositionwiseFeedForward</code>. <code>clones</code> copies layers so they do not share weights.</p>
+        <div class="box">
+          <p style="margin:0 0 .6rem">Self-attention: “red” looks hardest at “plane”.</p>
+          <div class="attn-grid">
+            <div class="cell"></div><div class="cell on"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell on"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell on"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div>
+          </div>
+          <p class="why" style="margin:.8rem 0 0">Inside <code>attention</code>: scores = Q·K / √d<sub>k</sub>, hide pads with −1e9, softmax, mix V. Eight heads in parallel, then concat + output linear.</p>
+        </div>
+      </section>
+      <section class="scene" data-i="5">
+        <h2>6. Eight heads, then a small MLP per word</h2>
+        <p class="why">Heads are 8 different “ways of looking.” Then every word goes through the same feed-forward net (512 → 2048 → 512, ReLU, dropout).</p>
+        <div class="grid8">
+          <div class="head"></div><div class="head"></div><div class="head"></div><div class="head"></div>
+          <div class="head"></div><div class="head"></div><div class="head"></div><div class="head"></div>
+        </div>
+        <p class="why" style="margin-top:1rem">After N encoder layers + a final <code>LayerNorm</code>, you have <strong>memory</strong> — German meaning the decoder will read.</p>
+        <div class="row"><span class="label">Memory</span>
+          <span class="tok mem">Ein*</span><span class="tok mem">rotes*</span><span class="tok mem">Flugzeug*</span><span class="tok mem">fliegt*</span>
+        </div>
+      </section>
+      <section class="scene" data-i="6">
+        <h2>7. Decoder starts with only &lt;s&gt;</h2>
+        <p class="why">At translation time (<code>greedy_decode</code> / <code>inference_test</code>) English is not given. The decoder writes left to right. Training is different: <code>Batch</code> shows the gold English shifted by one (<code>tgt</code> vs <code>tgt_y</code>) — teacher forcing.</p>
+        <div class="row"><span class="label">So far</span> <span class="tok tgt hi">&lt;s&gt;</span></div>
+      </section>
+      <section class="scene" data-i="7">
+        <h2>8. Causal mask — no peeking at the future</h2>
+        <p class="why"><code>subsequent_mask</code> builds a lower triangle. <code>Batch.make_std_mask</code> ANDs that with “not pad”. Decoder self-attention may only see words already written.</p>
+        <div class="box"><div class="tri">     A   red  plane
+A    ✓    ·     ·
+red  ✓    ✓     ·
+plane✓    ✓     ✓</div></div>
+      </section>
+      <section class="scene" data-i="8">
+        <h2>9. Three sub-layers in each DecoderLayer</h2>
+        <p class="why">Same residuals + dropout + norm as the paper’s decoder block.</p>
+        <div class="box">
+          <strong>1. Masked self-attention</strong> — among English so far<br />
+          <strong>2. Cross-attention</strong> — queries from English, keys/values from <em>memory</em> (German), using <code>src_mask</code><br />
+          <strong>3. Feed-forward</strong> — same MLP as the encoder
+        </div>
+        <p class="why"><code>Decoder</code> repeats this N times, then a final norm. <code>EncoderDecoder.decode</code> runs target embeddings + PE first.</p>
+      </section>
+      <section class="scene" data-i="9">
+        <h2>10. Generator picks the next word</h2>
+        <p class="why"><code>Generator</code>: linear to English vocab size, then log-softmax. Greedy decode takes only the <strong>last</strong> position, then <code>argmax</code>. Append that id to <code>ys</code> and loop until max length (or you stop at &lt;/s&gt; in <code>translate_german</code>).</p>
+        <div class="row">
+          <span class="tok tgt">&lt;s&gt;</span><span class="arrow">→</span>
+          <span class="tok tgt hi">A</span><span class="arrow">→</span>
+          <span class="tok tgt">red</span><span class="arrow">→</span>
+          <span class="tok tgt">plane</span><span class="arrow">→</span>
+          <span class="tok tgt">&lt;/s&gt;</span>
+        </div>
+        <p class="why">Encode German <strong>once</strong>. Decode many times. Always batch size 1 in greedy decode so attention shapes stay correct.</p>
+      </section>
+      <section class="scene" data-i="10">
+        <h2>11. How the model learns (training path)</h2>
+        <p class="why"><code>create_dataloaders</code> + Multi30k. <code>run_epoch</code> calls <code>model.forward(src, tgt, masks)</code>, then <code>SimpleLossCompute</code> (generator + <code>LabelSmoothing</code> + KLDiv). Backprop, Adam, <code>rate</code> (Noam warmup). <code>DummyOptimizer</code> on eval. <code>TrainState</code> counts steps. <code>train_model</code> loops epochs and saves weights.</p>
+        <div class="box">German batch &amp; English batch → predict every next English word at once → compare to gold → nudge millions of numbers a tiny bit.</div>
+      </section>
+      <section class="scene" data-i="11">
+        <h2>12. You have the whole notebook</h2>
+        <p class="why">That is the Annotated Transformer path: architecture, masks, Multi30k data, smoothed loss, Noam lr, greedy decode, <code>check_outputs</code> / <code>run_model_example</code>, <code>translate_german</code>.</p>
+        <p class="why">Harvard extras not built as cells here: Altair attention heatmaps, GPUtil, multi-GPU <code>DDP</code> worker (DDP is only imported), BPE, beam search, checkpoint averaging.</p>
+      </section>
+      <div class="controls">
+        <button type="button" id="prev">Back</button>
+        <button type="button" id="play">Pause</button>
+        <button type="button" id="next">Next</button>
+        <div class="bar" aria-hidden="true"><i id="fill"></i></div>
+        <span id="num" style="color:var(--muted);font-size:.85rem">1 / 12</span>
+      </div>
+    </main>
+    <aside>
+      <h3>Jump</h3>
+      <ol id="toc"></ol>
+      <div class="code-map">
+        Matches notebook pieces:<br />
+        <code>tokenize</code>, <code>Embeddings</code>, <code>PositionalEncoding</code>,
+        <code>Encoder</code>, <code>attention</code>, <code>DecoderLayer</code>,
+        <code>subsequent_mask</code>, <code>Generator</code>, <code>greedy_decode</code>,
+        <code>Batch</code>, <code>run_epoch</code>, <code>LabelSmoothing</code>, <code>rate</code>
+      </div>
+    </aside>
+  </div>
+  <script>
+    const scenes = [...document.querySelectorAll(".scene")];
+    const toc = document.getElementById("toc");
+    const titles = scenes.map((s) => s.querySelector("h2").textContent.replace(/^\d+\.\s*/, ""));
+    titles.forEach((t, i) => {
+      const li = document.createElement("li");
+      li.textContent = t;
+      li.onclick = () => go(i, true);
+      toc.appendChild(li);
+    });
+    let i = 0, playing = true, timer;
+    function go(n, stop) {
+      i = (n + scenes.length) % scenes.length;
+      scenes.forEach((s, k) => s.classList.toggle("on", k === i));
+      [...toc.children].forEach((li, k) => li.classList.toggle("active", k === i));
+      document.getElementById("num").textContent = i + 1 + " / " + scenes.length;
+      document.getElementById("fill").style.width = ((i + 1) / scenes.length * 100) + "%";
+      if (stop) { playing = false; document.getElementById("play").textContent = "Play"; }
+    }
+    function tick() { if (playing) go(i + 1); }
+    timer = setInterval(tick, 4200);
+    document.getElementById("next").onclick = () => go(i + 1, true);
+    document.getElementById("prev").onclick = () => go(i - 1, true);
+    document.getElementById("play").onclick = function () {
+      playing = !playing;
+      this.textContent = playing ? "Pause" : "Play";
+    };
+    go(0);
+  </script>
+</body>
+</html>
