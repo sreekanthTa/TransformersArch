@@ -8,8 +8,8 @@ This repo is **The Annotated Transformer** in PyTorch: German → English.
 
 | File | What it shows |
 |------|----------------|
-| [docs/transformer-flow.html](docs/transformer-flow.html) | Data walking through the whole model (auto-play) |
-| [docs/illustrated-blocks.html](docs/illustrated-blocks.html) | One animated card per notebook function |
+| [View Animation →](https://htmlpreview.github.io/?https://github.com/sreekanthTa/TransformersArch/blob/main/docs/transformer-flow.html) | Data walking through the whole model (auto-play) |
+| [View Blocks →](https://htmlpreview.github.io/?https://github.com/sreekanthTa/TransformersArch/blob/main/docs/illustrated-blocks.html) | One animated card per notebook function |
 
 ---
 
