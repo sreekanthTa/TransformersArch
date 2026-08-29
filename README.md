@@ -1,277 +1,496 @@
-# How a Transformer Turns German into English
+# Illustrated Transformer (no notebook needed)
 
-This project follows **[The Annotated Transformer](https://nlp.seas.harvard.edu/annotated-transformer/)** (Harvard NLP): the *Attention Is All You Need* model, written in PyTorch, trained as **German → English** on Multi30k.
+This repo is **The Annotated Transformer** in PyTorch: German → English.
 
-**You do not need to read the notebook first.** Read this page. Watch the animation. That is the whole machine.
+**How to use this page:** scroll. Every block in `implementation.ipynb` has a **picture** and a short “what you are seeing.” You do not need to open the code.
+
+**Moving pictures (browser):**
+
+| File | What it shows |
+|------|----------------|
+| [docs/transformer-flow.html](docs/transformer-flow.html) | Data walking through the whole model (auto-play) |
+| [docs/illustrated-blocks.html](docs/illustrated-blocks.html) | One animated card per notebook function |
 
 ---
 
-## Watch data move (animation)
+## The whole factory (what data does)
 
-Open this file in any browser (double-click is enough):
-
-**[docs/transformer-flow.html](docs/transformer-flow.html)**
-
-It auto-plays 12 scenes: sentence → IDs → vectors → encoder memory → decoder word-by-word → training. Pause, go back, or click the list on the right.
-
-GitHub cannot run that animation inside this README. The file in `docs/` is the real movie.
+```text
+  YOU TYPE GERMAN                    MODEL WRITES ENGLISH
+  "Ein rotes Flugzeug"               "<s> A red plane … </s>"
+           │                                    ▲
+           ▼                                    │
+     cut into words                        pick next word
+           │                                    │
+           ▼                                    │
+     replace words by numbers                   │
+           │                                    │
+           ▼                                    │
+     512 numbers per word  (meaning)            │
+     + a stamp for 1st / 2nd / 3rd place        │
+           │                                    │
+           ▼                                    │
+     ENCODER: German words look at              │
+     each other  (6 floors)                     │
+           │                                    │
+           ▼                                    │
+     MEMORY  =  "I understood the German"  ─────┘
+                  DECODER looks here
+                  while writing, one English
+                  word at a time
+```
 
 ```mermaid
-flowchart TB
-  subgraph IN["What you type"]
-    G["German sentence"]
-  end
-  subgraph PREP["Same as tokenize + collate_batch + Batch"]
-    T["Split into words"]
-    N["Map to ID numbers"]
-    S["Add start / end / pad"]
-    M["Build pad masks"]
-  end
-  subgraph ENC["Encoder — read German once"]
-    E1["Embeddings × √d_model"]
-    E2["Add positional encoding"]
-    E3["N × EncoderLayer"]
-    E4["Self-attention + feed-forward"]
-    MEM["memory"]
-  end
-  subgraph DEC["Decoder — write English"]
-    D0["Start with &lt;s&gt;"]
-    D1["Masked self-attention"]
-    D2["Cross-attention to memory"]
-    D3["Feed-forward"]
-    GEN["Generator: next-word scores"]
-  end
-  G --> T --> N --> S --> M
-  S --> E1 --> E2 --> E3 --> E4 --> MEM
-  MEM --> D2
-  D0 --> D1 --> D2 --> D3 --> GEN
-  GEN -->|"greedy_decode: pick best word, append, repeat"| D0
+flowchart LR
+  A[German text] --> B[IDs]
+  B --> C[Meaning + place]
+  C --> D[Encoder]
+  D --> E[Memory]
+  E --> F[Decoder]
+  G[English so far] --> F
+  F --> H[Next English word]
+  H --> G
 ```
 
 ---
 
-## The idea in four sentences
+## Picture atlas — every notebook piece
 
-1. A person translating **reads all of the German**, then **writes English one word at a time**, looking back at the German when needed.
-2. The **encoder** is the reader. The **decoder** is the writer.
-3. **Attention** means: “right now, which words should I look at?”
-4. Nothing inside waits like an old RNN. German words can all look at each other at once.
+Same order as the Annotated Transformer notebook.
 
 ---
 
-## Path of one example
+### Special tokens
 
-**German:** `Ein rotes Flugzeug fliegt`  
-**English we want:** `A red plane flies`
-
-### A. Text → numbers
-
-Computers do not store “Flugzeug” as letters for this model. `tokenize` (spaCy) splits words. `build_vocabulary` / `load_vocab` assign IDs. Unknown words become `<unk>`.
-
-Special tokens (same order as in the notebook):
-
-| Token | Role |
-|--------|------|
-| `<s>` | Start of sentence |
-| `</s>` | End of sentence |
-| `<blank>` | Padding so batch rows have equal length |
-| `<unk>` | Word not in the vocab |
-
-`collate_batch` builds: `[<s>] + word ids + [</s>]`, then pads on the right to `max_padding` (72 in the translation config).
-
-`Batch` then makes:
-
-- **src_mask** — “this German slot is a real word, not pad”
-- **tgt** — English *without* the last token (what the decoder is allowed to see)
-- **tgt_y** — English *without* the first token (what it should predict)
-- **tgt_mask** — pad **and** future English hidden (`subsequent_mask`)
-- **ntokens** — how many non-pad English labels, for averaging loss
-
-That shift is **teacher forcing**: show `<s> A red plane` and ask for `A red plane </s>`.
-
-### B. Numbers → meaning + place
-
-`Embeddings` turns each ID into **512** numbers (the paper’s `d_model`) and scales by √512.
-
-`PositionalEncoding` **adds** (does not concatenate) a sine/cosine pattern for each position so order is not lost. Max length in the buffer is 5000.
-
-Dropout is applied here and in several other places so the model cannot memorize one path.
-
-### C. Encoder (read German)
-
-`Encoder` = `N` copies of `EncoderLayer` (`clones` + `deepcopy` so weights are not shared), then a final `LayerNorm`.
-
-Each `EncoderLayer`:
-
-1. `SubLayerConnection`: pre-norm, **self-attention** (`Q=K=V` = German), residual, dropout  
-2. Same wrapper around **position-wise feed-forward**
-
-`attention` is scaled dot-product:  
-scores = (Q Kᵀ) / √dₖ → mask pads to a huge negative → softmax → weighted sum of V.
-
-`MultiHeadAttention` splits 512 into **8 heads** of 64, runs attention in each, concatenates, linear projection out. One mask is shared across heads (`unsqueeze` for the head axis).
-
-Feed-forward: 512 → 2048 → 512, ReLU, dropout (`PositionwiseFeedForward`).
-
-After the stack you have **memory**: one 512-vector per German position. `EncoderDecoder.encode` is this whole path. German is encoded **once** per sentence at translation time.
-
-### D. Decoder (write English)
-
-`Decoder` = `N` copies of `DecoderLayer` + final norm.
-
-Each `DecoderLayer` has **three** sublayers:
-
-1. **Masked self-attention** on English so far (`target_mask`)  
-2. **Cross-attention**: query = English, key/value = **memory**, `source_mask` = German pads  
-3. **Feed-forward** (same style as encoder)
-
-`subsequent_mask` is the causal triangle: position *t* cannot see *t+1, t+2, …*.
-
-`Generator` maps 512 → English vocab size and log-softmax.
-
-### E. Greedy translation
-
-`greedy_decode`:
-
-1. Keep only **one** example (`src[:1]`) — required because decode builds `ys` with batch size 1  
-2. `encode` once  
-3. Start `ys` at start-id  
-4. `decode` with a fresh causal mask  
-5. Take the **last** timestep, argmax, append  
-6. Repeat up to `max_len`
-
-`translate_german` does string → ids → greedy → words, cut at `</s>`.  
-`inference_test` is the same loop on a tiny fake vocab (untrained junk output is expected).  
-`check_outputs` / `run_model_example` print source, gold, and model text from the valid loader (`batch_size=1`).
-
----
-
-## Training path (same model, different schedule)
-
-```
-dataloader batch
-    → Batch masks
-    → EncoderDecoder.forward(src, tgt, src_mask, tgt_mask)
-    → hidden states
-    → SimpleLossCompute: Generator + LabelSmoothing (KLDiv)
-    → backward
-    → every accum_iter steps: Adam step, zero grad, LambdaLR with rate()
+```text
+  <s>        door opens     “start writing / start of sentence”
+  </s>       door closes    “the sentence is finished”
+  <blank>    empty chair    padding so rows in a batch are equally long
+  <unk>      mystery word   not in the dictionary
 ```
 
-`rate` is the paper’s **Noam** schedule: warmup, then decay like 1/√step. Adam betas (0.9, 0.98), eps 1e-9.
-
-`LabelSmoothing` spreads a little probability to other words so the model is not overconfident (pad row stays zero).
-
-`run_epoch` logs loss and tokens/sec. Eval uses `DummyOptimizer` and `DummyScheduler` so weights do not move. `TrainState` counts steps, samples, tokens.
-
-`train_model` builds `N=6`, runs epochs, saves `{prefix}{epoch}.pt` and `final.pt`.
-
-`make_model` wires encoder, decoder (two attention modules in the decoder layer), two embed+PE stacks, generator, Xavier init on matrices.
+`collate_batch` always does: **start + words + end**, then fills empty chairs on the right.
 
 ---
 
-## Every piece in this notebook (Annotated Transformer map)
+### `clear_multi30k_cache`
 
-Nothing below is a random extra name. If it is in `implementation.ipynb`, it is here.
+```text
+  [broken download folder]  ──delete──►  empty
+  Next run can download Multi30k again.
+```
 
-### Setup
-
-| Name | What it is for |
-|------|----------------|
-| pip cell | Pin `torch` / `torchtext` so they match |
-| Multi30k URL/MD5 patch | Official Harvard fix for broken dataset links |
-| `clear_multi30k_cache` | Delete corrupt torchtext cache |
-| `BOS_TOKEN` … `SPECIALS` | `<s> </s> <blank> <unk>` |
-
-### Architecture (paper figure)
-
-| Name | What it is for |
-|------|----------------|
-| `clones` | N independent copies of a layer |
-| `LayerNorm` | Stabilize each token’s 512-vector |
-| `SubLayerConnection` | Pre-norm + dropout + residual |
-| `attention` | Scaled dot-product attention |
-| `MultiHeadAttention` | 8 heads, Q/K/V/O linears |
-| `PositionwiseFeedForward` | MLP on every position |
-| `EncoderLayer` | Self-attn + FFN |
-| `Encoder` | Stack + final norm |
-| `DecoderLayer` | Masked self + cross + FFN |
-| `Decoder` | Stack + final norm |
-| `Embeddings` | ID → vector × √d |
-| `PositionalEncoding` | Add sinusoids |
-| `Generator` | Hidden → log-probs over English |
-| `EncoderDecoder` | `encode` / `decode` / `forward` |
-| `make_model` | Build the full net |
-
-### Masks and first inference
-
-| Name | What it is for |
-|------|----------------|
-| `subsequent_mask` | Causal triangle |
-| `inference_test` | Smoke test decode on dummy ids |
-
-### Data
-
-| Name | What it is for |
-|------|----------------|
-| `tokenize` / `load_tokenizers` | spaCy DE/EN |
-| `_multi30k_corpus` | Train+valid (+test if it loads) |
-| `yield_tokens` | Feed vocab builder |
-| `build_vocabulary` / `load_vocab` | min_freq=2, save `vocab.pt` |
-| `collate_batch` | BOS/EOS/pad/stack |
-| `create_dataloaders` | Multi30k DataLoaders |
-
-### Training utilities
-
-| Name | What it is for |
-|------|----------------|
-| `Batch` | Tensors + masks + ntokens |
-| `LabelSmoothing` | Soft targets + KLDiv |
-| `SimpleLossCompute` | Generator + criterion / ntokens |
-| `TrainState` | Counters |
-| `DummyOptimizer` / `DummyScheduler` | Eval no-ops |
-| `rate` | Noam learning rate |
-| `run_epoch` | One pass, accum, log |
-| `train_model` | Full train/valid loop |
-
-### Translation
-
-| Name | What it is for |
-|------|----------------|
-| `greedy_decode` | Autoregressive argmax |
-| `translate_german` | String in, string out |
-| `check_outputs` | Print examples |
-| `run_model_example` | Load vocab, batch_size=1, optional weights |
-
-`DDP` is **imported** (Harvard multi-GPU). This notebook’s `train_model` is **single device**. There is no Altair attention-plot cell, no GPUtil, no BPE, no beam search, no checkpoint averaging — those are extra sections in the original blog, not this file.
+Only if the dataset cache is corrupt.
 
 ---
 
-## Shapes (intuition only)
+### `tokenize` / `load_tokenizers`
 
-For one padded sentence of length 72, `d_model=512`, 8 heads:
+```text
+  "Ein rotes Flugzeug"
+           │  spaCy German
+           ▼
+  Ein | rotes | Flugzeug
+```
 
-- IDs: 72 numbers  
-- After embed: 72 × 512  
-- One head: 72 × 64  
-- Memory: 72 × 512  
-- While decoding after 3 English words: decoder sees length 3, still reads memory of length 72  
+English sentences use the English spaCy model. That is all tokenization is.
+
+---
+
+### `clones`
+
+```text
+  one layer template
+        │
+        ├── copy 1  (own weights)
+        ├── copy 2
+        └── copy N     paper uses N = 6
+```
+
+If you reused the *same* layer six times, all floors would share one brain. `deepcopy` gives six separate brains.
+
+---
+
+### `LayerNorm`
+
+```text
+  one word’s 512 numbers:   ■■■■■ noisy mix
+           │  subtract average, divide by spread
+           ▼
+  same 512 numbers:         ▬▬▬▬▬ calmer, comparable
+           │  learnable stretch + shift
+           ▼
+  ready for the next block
+```
+
+It is **per word**, not per batch. Stops values from exploding or dying.
+
+---
+
+### `SubLayerConnection` (residual + dropout)
+
+```text
+  incoming ──────────────────────────────────┐
+       │                                     │  ADD
+       ▼                                     │
+    LayerNorm                                │
+       │                                     │
+       ▼                                     │
+    the real work (attention or FFN)         │
+       │                                     │
+    dropout (randomly drop some signals)     │
+       │                                     │
+       ▼                                     ▼
+              outgoing = old + new
+```
+
+You always keep a copy of the old signal. That is why a 6-floor tower can still train.
+
+---
+
+### `attention` (the heart)
+
+```text
+  Query  = “what am I looking for?”
+  Key    = “what do I offer?”
+  Value  = “what content do I give you?”
+
+  For every pair (me, them):
+      score = how well Query matches Key
+      divide by √64 so scores are not huge
+      if mask says 0: score → “ignore me”
+      softmax: turn scores into % that add to 100%
+      output = mix of Values using those %
+```
+
+```mermaid
+flowchart LR
+  Q[Query] --> S[scores]
+  K[Key] --> S
+  S --> M[mask pads / future]
+  M --> P[percentages]
+  V[Value] --> O[mix]
+  P --> O
+```
+
+---
+
+### `MultiHeadAttention`
+
+```text
+  512 numbers
+       │ split into 8 views of 64
+       ▼
+  head1  head2  head3  …  head8     (8 ways of looking at once)
+       │ glue back to 512
+       ▼
+  one linear mix  →  still 512
+```
+
+Encoder self-attention: Q, K, V all from German.  
+Decoder self-attention: all from English so far.  
+Cross-attention: Q from English, K and V from **memory**.
+
+---
+
+### `PositionwiseFeedForward`
+
+```text
+  each word, alone (same recipe for every position)
+
+  512  ──widen──►  2048  ──ReLU──►  ──narrow──►  512
+```
+
+Attention mixes **words**. This MLP rethinks **one** word.
+
+---
+
+### `EncoderLayer`
+
+```text
+  German vectors
+       │
+       ▼
+  [norm → self-attention → drop] + skip
+       │
+       ▼
+  [norm → feed-forward → drop] + skip
+```
+
+---
+
+### `Encoder`
+
+```text
+  floor 1  EncoderLayer
+  floor 2  EncoderLayer
+  …
+  floor 6  EncoderLayer
+       │
+       ▼
+  extra LayerNorm
+       │
+       ▼
+  MEMORY   (German, fully mixed)
+```
+
+`EncoderDecoder.encode` = embeddings + positions + this stack.
+
+---
+
+### `DecoderLayer`
+
+```text
+  English so far
+       │
+       ▼
+  1. Masked self-attention     (only past English)
+       │
+       ▼
+  2. Cross-attention           (look at MEMORY / German)
+       │
+       ▼
+  3. Feed-forward
+```
+
+---
+
+### `Decoder`
+
+```text
+  same 3-step floor, repeated N times, then LayerNorm
+```
+
+`EncoderDecoder.decode` = English embeddings + positions + this stack.
+
+---
+
+### `Embeddings`
+
+```text
+  id 47  →  lookup row 47  →  512 numbers  →  multiply by √512
+```
+
+German table and English table are **different**.
+
+---
+
+### `PositionalEncoding`
+
+```text
+  place 1:  gentle wave pattern
+  place 2:  a bit shifted
+  place 3:  …
+
+  meaning vector  +  wave  =  still 512 numbers
+              (add, do not glue extra length)
+```
+
+Without this, “red plane” and “plane red” look the same to attention.
+
+---
+
+### `Generator`
+
+```text
+  512 numbers for one position
+       │  big linear layer
+       ▼
+  one score per English word in the vocab
+       │  log-softmax
+       ▼
+  “how likely is each next word?”
+```
+
+---
+
+### `EncoderDecoder`
+
+```text
+  TRAIN (all at once):
+    encode(German) → memory
+    decode(English prefix, memory) → hidden states
+
+  TRANSLATE:
+    encode(German) once
+    decode again and again, growing English
+```
+
+---
+
+### `make_model`
+
+```text
+  New attention brick, new FFN brick, new PE brick
+       │  deepcopy into encoder floors, decoder floors
+       ▼
+  Encoder stack + Decoder stack
+  + German embed+PE
+  + English embed+PE
+  + Generator
+       │  Xavier init on matrices
+       ▼
+  Ready network  (paper: N=6, d=512, ff=2048, heads=8)
+```
+
+---
+
+### `subsequent_mask` (no future)
+
+```text
+         word0  word1  word2  word3
+  word0    ✓      ·      ·      ·
+  word1    ✓      ✓      ·      ·
+  word2    ✓      ✓      ✓      ·
+  word3    ✓      ✓      ✓      ✓
+```
+
+Dots are forbidden. Training cannot cheat by reading the answer ahead.
+
+---
+
+### `inference_test`
+
+Tiny fake vocab, untrained weights, same encode/decode loop as real translation. Output will look like random ids. That is a **shape test**, not a translator.
+
+---
+
+### `Batch`
+
+```text
+  full English:   <s>  A   red  plane  </s>
+  decoder sees:   <s>  A   red  plane
+  must predict:        A   red  plane  </s>
+```
+
+Plus masks: ignore pads; ignore future.
+
+---
+
+### Vocabulary helpers
+
+```text
+  many German captions  →  count words  →  keep if seen ≥ 2 times
+  save as vocab.pt
+
+  yield_tokens     walks the corpus
+  build_vocabulary builds both languages
+  load_vocab       loads file or builds once
+  _multi30k_corpus train + valid (+ test if it loads)
+```
+
+---
+
+### `collate_batch` / `create_dataloaders`
+
+```text
+  several sentence pairs
+       │  tokenize, ids, <s> </s>, pad to 72
+       ▼
+  two grids of numbers:  German batch  |  English batch
+```
+
+`create_dataloaders` wraps Multi30k. Translation demos use **batch size 1**.
+
+---
+
+### `LabelSmoothing`
+
+```text
+  instead of 100% on the true word:
+
+  true word  ~ 90%
+  all others share ~10%
+  pad stays 0
+```
+
+Stops the model from being arrogantly sure.
+
+---
+
+### `SimpleLossCompute`
+
+```text
+  hidden states → Generator → compare to smoothed labels → loss
+  divide by number of real (non-pad) tokens
+```
+
+---
+
+### `rate` (learning-rate schedule)
+
+```text
+  steps →
+  lr slowly UP during warmup (e.g. 3000)
+       then DOWN like 1 / sqrt(step)
+```
+
+Paper name: Noam schedule. Used with Adam.
+
+---
+
+### `run_epoch` / `TrainState` / dummies
+
+```text
+  for each batch:
+      forward → loss → backward
+      every few batches: update weights  (accumulation)
+      log loss and speed
+
+  eval: DummyOptimizer / DummyScheduler  (look, don’t touch)
+  TrainState: how many steps / sentences / tokens
+```
+
+---
+
+### `train_model`
+
+```text
+  make N=6 model
+  for each epoch: train run_epoch → save → valid run_epoch
+  save final.pt
+```
+
+---
+
+### `greedy_decode`
+
+```text
+  memory = encode(German)          ← once
+  english = [ <s> ]
+  loop:
+      look at english + memory
+      take the LAST position
+      pick the highest-scoring word
+      append it
+```
+
+Always **one sentence** at a time (slice batch to 1).
+
+---
+
+### `translate_german` / `check_outputs` / `run_model_example`
+
+```text
+  string → ids → greedy_decode → words → cut at </s>
+
+  check_outputs: print German, gold English, model English
+  run_model_example: load vocab, tiny N=2 smoke model, optional weights
+```
+
+---
+
+## What this notebook does *not* include
+
+The Harvard **blog** also shows attention heatmaps (Altair), GPU monitors, multi-GPU DDP training, BPE, beam search, averaging checkpoints. Those are not cells here. `DDP` is only imported.
 
 ---
 
 ## Files
 
-| File | Role |
-|------|------|
-| [implementation.ipynb](implementation.ipynb) | Full Annotated Transformer implementation |
-| [docs/transformer-flow.html](docs/transformer-flow.html) | **Animated** data path |
-| `vocab.pt` | Saved German/English vocab if you built it |
-| This README | The story in English |
+- `implementation.ipynb` — the running code  
+- `docs/transformer-flow.html` — movie of the pipeline  
+- `docs/illustrated-blocks.html` — one card per block  
+- `vocab.pt` — saved dictionaries after you build them  
 
-Run the notebook **top to bottom**. Restarting the kernel means run every cell again. An untrained model will not produce real English; that is normal. Uncomment the training config at the bottom for a long GPU run (`N=6`, 8 epochs).
-
----
-
-## Remember
-
-**Encoder** fills a German memory. **Decoder** writes English, looking at that memory, never at future English. **Attention** is the looking. Everything else (norm, residual, PE, FFN, masks, smoothed loss, warmup lr) exists so that looking can be trained stably.
+Run the notebook top to bottom only when you want it to execute. This README is the illustrated course.
